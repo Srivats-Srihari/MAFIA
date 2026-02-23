@@ -1,0 +1,19 @@
+{
+  "name": "node-text-mafia",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Text-based Mafia game loop with AI stubs, mirroring the Unity flow.",
+  "main": "src/cli.js",
+  "scripts": {
+    "start": "node src/cli.js",
+    "gui": "node src/guiServer.js",
+    "env:sync": "node scripts/sync-env.js",
+    "run:pi": "node scripts/sync-env.js && node src/guiServer.js"
+  },
+  "dependencies": {
+    "@heyputer/puter.js": "latest"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
