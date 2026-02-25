@@ -7,8 +7,10 @@
   "scripts": {
     "start": "node src/cli.js",
     "gui": "node src/guiServer.js",
+    "colab:gui": "node src/guiServer.js",
     "env:sync": "node scripts/sync-env.js",
-    "run:pi": "node scripts/sync-env.js && node src/guiServer.js"
+    "run:pi": "node scripts/sync-env.js && node src/guiServer.js",
+    "run:pi:cli": "node scripts/sync-env.js && node src/cli.js"
   },
   "dependencies": {
     "@heyputer/puter.js": "latest"

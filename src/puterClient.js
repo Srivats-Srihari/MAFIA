@@ -11,7 +11,7 @@ const puterByToken = new Map();
 const SAMBANOVA_DEFAULT_MODEL = process.env.SAMBANOVA_MODEL || "ALLaM-7B-Instruct-preview";
 const SAMBANOVA_BASE_URL = process.env.SAMBANOVA_BASE_URL || "https://api.sambanova.ai/v1";
 const AI_PROVIDER_MODE = String(process.env.MAFIA_AI_PROVIDER || "auto").trim().toLowerCase();
-const DEFAULT_PROVIDER_CHAIN = "puter,sambanova,mistral,openrouter,together,groq";
+const DEFAULT_PROVIDER_CHAIN = "puter,sambanova,mistral,groq,claude,openrouter,together";
 
 function firstEnv(...keys) {
   for (const k of keys) {
@@ -19,6 +19,31 @@ function firstEnv(...keys) {
     if (typeof v === "string" && v.trim()) return v.trim();
   }
   return "";
+}
+
+function stringifyAny(v) {
+  if (typeof v === "string") return v;
+  try {
+    return JSON.stringify(v);
+  } catch (_) {
+    return String(v);
+  }
+}
+
+function normalizeError(err, prefix = "") {
+  if (err instanceof Error) return err;
+  let msg = "";
+  if (err && typeof err === "object") {
+    msg =
+      err.message ||
+      (err.error && err.error.message) ||
+      (err.error && stringifyAny(err.error)) ||
+      stringifyAny(err);
+  } else {
+    msg = String(err);
+  }
+  const full = (prefix ? `${prefix}: ` : "") + (msg || "Unknown error");
+  return new Error(full);
 }
 
 function loadInitModule() {
@@ -67,7 +92,7 @@ async function ensurePuterClient() {
 
 function getPuterTokenCandidates() {
   const csv = String(process.env.PUTER_AUTH_TOKENS || "")
-    .split(",")
+    .split(/[,\n;]+/)
     .map((s) => s.trim())
     .filter(Boolean);
   const merged = dedupeModels([
@@ -87,7 +112,12 @@ async function getPuterClientForToken(token) {
   if (puterByToken.has(key)) {
     return puterByToken.get(key);
   }
-  const client = initFn(key);
+  let client;
+  try {
+    client = initFn(key);
+  } catch (err) {
+    throw normalizeError(err, "Puter init failed");
+  }
   if (!client || !client.ai || typeof client.ai.chat !== "function") {
     throw new Error("Initialized Puter client is missing ai.chat.");
   }
@@ -119,7 +149,7 @@ async function puterChat(prompt, model) {
     try {
       return await chatWithProvider(provider, prompt, model);
     } catch (err) {
-      lastError = err;
+      lastError = normalizeError(err, `provider=${provider}`);
       continue;
     }
   }
@@ -278,7 +308,69 @@ async function chatWithProvider(provider, prompt, model) {
     defaultModels: csvModels("GROQ_MODELS", [firstEnv("GROQ_MODEL"), "llama-3.3-70b-versatile", "llama-3.1-8b-instant"]),
     prompt
   });
+  if (provider === "claude" || provider === "anthropic") return anthropicChat({
+    name: "claude",
+    url: firstEnv("CLAUDE_BASE_URL", "ANTHROPIC_BASE_URL") || "https://api.anthropic.com/v1/messages",
+    apiKey: firstEnv("CLAUDE_API_KEY", "ANTHROPIC_API_KEY"),
+    model: String(model || "").trim(),
+    defaultModels: csvModels("CLAUDE_MODELS", [firstEnv("CLAUDE_MODEL", "ANTHROPIC_MODEL"), "claude-3-7-sonnet-latest"]),
+    prompt
+  });
   throw new Error(`Unsupported provider: ${provider}`);
+}
+
+async function anthropicChat(opts) {
+  const url = String(opts.url || "");
+  const apiKey = String(opts.apiKey || "").trim();
+  const model = String(opts.model || "").trim();
+  const prompt = String(opts.prompt || "");
+  const temperature = Number(process.env.MAFIA_PROVIDER_TEMPERATURE || 0.2);
+  const modelCandidates = dedupeModels([model, ...(Array.isArray(opts.defaultModels) ? opts.defaultModels : [])]);
+  if (!url || !apiKey || modelCandidates.length === 0) {
+    const missing = [];
+    if (!url) missing.push("base_url");
+    if (!apiKey) missing.push("api_key");
+    if (modelCandidates.length === 0) missing.push("model");
+    throw new Error(`${opts.name} not configured: missing ${missing.join(", ")}`);
+  }
+
+  let lastErr = null;
+  for (const candidateModel of modelCandidates) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model: candidateModel,
+        max_tokens: Number(process.env.CLAUDE_MAX_TOKENS || 700),
+        temperature,
+        system: "You are a strategic Mafia game agent. Return only requested content.",
+        messages: [
+          { role: "user", content: prompt }
+        ]
+      })
+    });
+    const txt = await res.text();
+    let obj = null;
+    try {
+      obj = JSON.parse(txt);
+    } catch (_) {
+      obj = null;
+    }
+    if (res.ok) {
+      const contentArr = obj && Array.isArray(obj.content) ? obj.content : [];
+      const firstText = contentArr.find((c) => c && c.type === "text" && typeof c.text === "string");
+      if (firstText && firstText.text) return String(firstText.text);
+      lastErr = new Error(`${opts.name} returned empty content for model ${candidateModel}`);
+      continue;
+    }
+    const msg = obj && obj.error ? (obj.error.message || JSON.stringify(obj.error)) : txt;
+    lastErr = new Error(`${opts.name} error ${res.status} [${candidateModel}]: ${String(msg).slice(0, 220)}`);
+  }
+  throw lastErr || new Error(`${opts.name} request failed`);
 }
 
 async function puterOnlyChat(prompt, model) {
@@ -310,7 +402,7 @@ async function puterOnlyChat(prompt, model) {
         if (txt && txt !== "{}") return txt;
         lastErr = new Error(`puter returned empty content for model ${candidate}`);
       } catch (err) {
-        lastErr = err;
+        lastErr = normalizeError(err, `puter model=${candidate}`);
         continue;
       }
     }

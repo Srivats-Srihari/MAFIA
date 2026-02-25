@@ -1,6 +1,9 @@
 node_modules/
 saved_games/
 .env
+.env.*
+!.env.example
+!.env.pi.multimix.example
 .DS_Store
 npm-debug.log*
 yarn-error.log*

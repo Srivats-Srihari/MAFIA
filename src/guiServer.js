@@ -3,7 +3,19 @@ const { URL } = require("url");
 const { GameManager } = require("./gameManager");
 const { initPuterClient, setAuthToken, loginViaBrowser, probePuter, verifyPuterAuthSources } = require("./puterClient");
 
+process.on("unhandledRejection", (reason) => {
+  const msg = (reason && reason.message) ? reason.message : (() => {
+    try { return JSON.stringify(reason); } catch (_) { return String(reason); }
+  })();
+  console.error("Unhandled async error:", msg);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err && err.message ? err.message : err);
+});
+
 const PORT = Number(process.env.MAFIA_GUI_PORT || 8787);
+const HOST = String(process.env.MAFIA_GUI_HOST || "0.0.0.0");
 const game = new GameManager({ masterMode: true });
 let queue = Promise.resolve();
 let analytics = {
@@ -560,8 +572,11 @@ async function main() {
       autoPhase.nextAt = Date.now() + autoPhase.intervalSec * 1000;
     }).catch(() => {});
   }, 400);
-  server.listen(PORT, () => {
-    console.log(`Text Mafia GUI running at http://localhost:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    console.log(`Text Mafia GUI running at http://${HOST}:${PORT}`);
+    if (HOST !== "localhost" && HOST !== "127.0.0.1") {
+      console.log(`Local access: http://localhost:${PORT}`);
+    }
   });
 }
 

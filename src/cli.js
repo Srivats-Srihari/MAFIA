@@ -1,6 +1,18 @@
 const readline = require("readline");
+const { execFile } = require("child_process");
 const { GameManager } = require("./gameManager");
 const { initPuterClient, getAuthToken, setAuthToken, loginViaBrowser, probePuter, verifyPuterAuthSources } = require("./puterClient");
+
+process.on("unhandledRejection", (reason) => {
+  const msg = (reason && reason.message) ? reason.message : (() => {
+    try { return JSON.stringify(reason); } catch (_) { return String(reason); }
+  })();
+  console.error("Unhandled async error:", msg);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err && err.message ? err.message : err);
+});
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -17,6 +29,8 @@ function printHelp() {
   console.log("  next              Advance one phase");
   console.log("  run               Auto-run until winner");
   console.log("  multi <n>         Run n games consecutively and report winners");
+  console.log("  multipar <n> [k]  Run n games with up to k concurrent workers (default 5)");
+  console.log("  multimix <n> [groq=2|3]  Mixed parallel workers: 3 puter + 1 mistral + groq + 1 claude + 1 sambanova");
   console.log("  playercount <n>=5 Set total players for next game");
   console.log("  save on|off [dir] Enable/disable save-to-file mode");
   console.log("  savenow [tag]     Save current game snapshot immediately");
@@ -136,6 +150,197 @@ async function runMulti(game, count) {
   console.log("Multi-game summary:", winners);
 }
 
+function buildParallelSeedConfig(baseGame) {
+  return {
+    usePuter: !!baseGame.ai.usePuter,
+    defaultModel: baseGame.ai.defaultModel,
+    playerCount: Math.max(5, Number(baseGame.playerCount || 6)),
+    separateHumanPlayer: false
+  };
+}
+
+async function runSingleParallelGame(seed) {
+  const gm = new GameManager({
+    masterMode: false,
+    separateHumanPlayer: !!seed.separateHumanPlayer,
+    playerCount: seed.playerCount,
+    saveToFileMode: false,
+    alwaysWriteLogsToFile: false
+  });
+  gm.ai.setUsePuter(!!seed.usePuter);
+  gm.ai.setDefaultModel(seed.defaultModel || gm.ai.defaultModel);
+  await gm.setupGame();
+  while (!gm.winner) {
+    await gm.nextPhase();
+  }
+  return gm.winner || "Unknown";
+}
+
+async function runMultiParallel(game, countArg, workersArg) {
+  const total = Math.max(1, Number(countArg) || 1);
+  const workers = Math.max(1, Math.min(20, Number(workersArg) || 5));
+  const winners = {};
+  const seed = buildParallelSeedConfig(game);
+  let completed = 0;
+  let nextIndex = 1;
+
+  async function workerLoop() {
+    while (true) {
+      const idx = nextIndex;
+      if (idx > total) return;
+      nextIndex += 1;
+      const winner = await runSingleParallelGame(seed);
+      winners[winner] = (winners[winner] || 0) + 1;
+      completed += 1;
+      console.log(`Game ${completed}/${total} done (worker game #${idx}) winner: ${winner}`);
+    }
+  }
+
+  const startedAt = Date.now();
+  const pool = [];
+  const spawnCount = Math.min(workers, total);
+  for (let i = 0; i < spawnCount; i++) {
+    pool.push(workerLoop());
+  }
+  await Promise.all(pool);
+  const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+  console.log(`Parallel multi-game summary (${total} games, ${spawnCount} workers, ${secs}s):`, winners);
+}
+
+function parseCsvEnv(name) {
+  return String(process.env[name] || "")
+    .split(/[,\n;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function buildMixedProfiles(groqCountArg) {
+  const groqCount = Math.max(2, Math.min(3, Number(groqCountArg) || 2));
+  const profiles = [];
+  const puterTokens = parseCsvEnv("PUTER_AUTH_TOKENS");
+  for (let i = 0; i < 3; i++) {
+    if (!puterTokens[i]) continue;
+    profiles.push({
+      id: `puter#${i + 1}`,
+      provider: "puter",
+      env: {
+        MAFIA_AI_PROVIDER: "puter",
+        PUTER_AUTH_TOKEN: puterTokens[i],
+        PUTER_AUTH_TOKENS: puterTokens[i]
+      }
+    });
+  }
+  if (String(process.env.MISTRAL_API_KEY || "").trim()) {
+    profiles.push({ id: "mistral#1", provider: "mistral", env: { MAFIA_AI_PROVIDER: "mistral" } });
+  }
+  if (String(process.env.GROQ_API_KEY || "").trim()) {
+    for (let i = 0; i < groqCount; i++) {
+      profiles.push({ id: `groq#${i + 1}`, provider: "groq", env: { MAFIA_AI_PROVIDER: "groq" } });
+    }
+  }
+  if (String(process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || "").trim()) {
+    profiles.push({ id: "claude#1", provider: "claude", env: { MAFIA_AI_PROVIDER: "claude" } });
+  }
+  if (String(process.env.SAMBANOVA_API_KEY || "").trim()) {
+    profiles.push({
+      id: "sambanova#1",
+      provider: "sambanova",
+      env: { MAFIA_AI_PROVIDER: "sambanova", PYTHON_BIN: process.env.PYTHON_BIN || "python3" }
+    });
+  }
+  return profiles;
+}
+
+function runWorkerGame(profile, seed) {
+  return new Promise((resolve, reject) => {
+    const env = {
+      ...process.env,
+      ...profile.env,
+      MAFIA_HEADLESS: "1",
+      MAFIA_WORKER_USE_PUTER: seed.usePuter ? "1" : "0",
+      MAFIA_WORKER_DEFAULT_MODEL: seed.defaultModel || "",
+      MAFIA_WORKER_PLAYER_COUNT: String(seed.playerCount || 6)
+    };
+    const nodeBin = process.execPath || "node";
+    execFile(
+      nodeBin,
+      ["src/workerGame.js"],
+      {
+        env,
+        windowsHide: true,
+        timeout: Number(process.env.MAFIA_WORKER_TIMEOUT_MS || 300000),
+        maxBuffer: 1024 * 1024
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(String(stderr || stdout || error.message || "worker failed").trim()));
+          return;
+        }
+        let parsed = null;
+        try {
+          parsed = JSON.parse(String(stdout || "").trim() || "{}");
+        } catch (err) {
+          reject(new Error(`worker output parse failed: ${String(stdout || "").slice(0, 220)}`));
+          return;
+        }
+        resolve(parsed && parsed.winner ? parsed.winner : "Unknown");
+      }
+    );
+  });
+}
+
+async function runMultiMix(game, totalArg, groqCountArg) {
+  const total = Math.max(1, Number(totalArg) || 1);
+  const profiles = buildMixedProfiles(groqCountArg);
+  if (profiles.length === 0) {
+    console.log("No mixed profiles available. Set keys/tokens first.");
+    return;
+  }
+  const counts = {
+    puter: profiles.filter((p) => p.provider === "puter").length,
+    mistral: profiles.filter((p) => p.provider === "mistral").length,
+    groq: profiles.filter((p) => p.provider === "groq").length,
+    claude: profiles.filter((p) => p.provider === "claude").length,
+    sambanova: profiles.filter((p) => p.provider === "sambanova").length
+  };
+  if (counts.puter < 3) console.log(`Warning: requested 3 puter workers but found ${counts.puter} tokens.`);
+  if (counts.mistral < 1) console.log("Warning: Mistral worker missing (set MISTRAL_API_KEY).");
+  if (counts.groq < 2) console.log("Warning: Groq workers below requested minimum (set GROQ_API_KEY).");
+  if (counts.claude < 1) console.log("Warning: Claude worker missing (set CLAUDE_API_KEY).");
+  if (counts.sambanova < 1) console.log("Warning: SambaNova worker missing (set SAMBANOVA_API_KEY).");
+  const seed = buildParallelSeedConfig(game);
+  seed.usePuter = true;
+  const winners = {};
+  let nextIndex = 1;
+  let completed = 0;
+  let failures = 0;
+  const startedAt = Date.now();
+
+  console.log("Mixed workers:", profiles.map((p) => p.id).join(", "));
+
+  async function workerLoop(profile) {
+    while (true) {
+      const idx = nextIndex;
+      if (idx > total) return;
+      nextIndex += 1;
+      try {
+        const winner = await runWorkerGame(profile, seed);
+        winners[winner] = (winners[winner] || 0) + 1;
+        completed += 1;
+        console.log(`Game ${completed}/${total} done via ${profile.id} winner: ${winner}`);
+      } catch (err) {
+        failures += 1;
+        completed += 1;
+        console.log(`Game ${completed}/${total} failed via ${profile.id}: ${err && err.message ? err.message : err}`);
+      }
+    }
+  }
+
+  await Promise.all(profiles.map((p) => workerLoop(p)));
+  const secs = ((Date.now() - startedAt) / 1000).toFixed(1);
+  console.log(`Mixed multi summary (${total} games, ${profiles.length} workers, ${secs}s):`, winners, `failures=${failures}`);
+}
+
 async function main() {
   const game = new GameManager({ masterMode: false });
   await game.setupGame();
@@ -185,6 +390,25 @@ async function main() {
           break;
         case "multi":
           await runMulti(game, arg || "1");
+          break;
+        case "multipar":
+        case "multix":
+        case "parallel":
+          {
+            const segs = arg.split(/\s+/).filter(Boolean);
+            const total = segs[0] || "1";
+            const workers = segs[1] || "5";
+            await runMultiParallel(game, total, workers);
+          }
+          break;
+        case "multimix":
+        case "mix":
+          {
+            const segs = arg.split(/\s+/).filter(Boolean);
+            const total = segs[0] || "1";
+            const groqCount = segs[1] || "2";
+            await runMultiMix(game, total, groqCount);
+          }
           break;
         case "playercount":
           if (!arg) {

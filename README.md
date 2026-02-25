@@ -34,6 +34,11 @@ nano .env
 npm run run:pi
 ```
 
+For Raspberry Pi CLI mode:
+```bash
+npm run run:pi:cli
+```
+
 ## .env Configuration (recommended)
 
 The app auto-loads `.env` from project root.
@@ -64,6 +69,11 @@ npm run gui
 
 Open:
 - `http://localhost:8787`
+- Google Colab: see `colab/COLAB_SETUP.md`
+
+Host/port env (useful for Colab or remote hosts):
+- `MAFIA_GUI_HOST` (default: `0.0.0.0`)
+- `MAFIA_GUI_PORT` (default: `8787`)
 
 GUI includes:
 - auto phase countdown/run
@@ -94,8 +104,8 @@ Optional env:
 - `PUTER_AUTH_TOKEN` (optional; if omitted, Puter auth flow is used)
 - `PUTER_AUTH_TOKENS` (optional CSV of up to 5 tokens; runtime rotates and uses first non-error token)
 - `PUTER_AGENT_NAMES` (optional CSV for player names, e.g. `GPT-5.2,GPT-4.1,Claude,Gemini,Llama,Mistral`)
-- `MAFIA_AI_PROVIDER` (`auto` default, or one of `puter|sambanova|mistral|openrouter|together|groq`)
-- `MAFIA_PROVIDER_CHAIN` (comma list for `auto` mode; default `puter,sambanova,mistral,openrouter,together,groq`)
+- `MAFIA_AI_PROVIDER` (`auto` default, or one of `puter|sambanova|mistral|groq|claude|openrouter|together`)
+- `MAFIA_PROVIDER_CHAIN` (comma list for `auto` mode; default `puter,sambanova,mistral,groq,claude,openrouter,together`)
 
 ## SambaNova Fallback (when Puter fails/stops)
 
@@ -125,7 +135,7 @@ MAFIA_AI_PROVIDER=sambanova SAMBANOVA_API_KEY=your_key_here npm start
 ```
 
 Notes:
-- Default `auto` mode tries providers in order: `puter -> sambanova -> mistral -> openrouter -> together -> groq`.
+- Default `auto` mode tries providers in order: `puter -> sambanova -> mistral -> groq -> claude -> openrouter -> together`.
 - By default fallback uses `SAMBANOVA_MODEL`, not Puter model names.
 - If you want to pass requested model name through to SambaNova, set `SAMBANOVA_USE_REQUESTED_MODEL=1`.
 - In `auto` mode, fallback triggers on any Puter failure when `SAMBANOVA_API_KEY` is set. To use strict error matching only, set `SAMBANOVA_FALLBACK_STRICT_MATCH=1`.
@@ -150,6 +160,10 @@ Set keys only for providers you want in your chain:
   - `GROQ_API_KEY`
   - `GROQ_MODEL` (default `llama-3.1-70b-versatile`)
   - `GROQ_BASE_URL` (default `https://api.groq.com/openai/v1/chat/completions`)
+- Claude (Anthropic):
+  - `CLAUDE_API_KEY` (or `ANTHROPIC_API_KEY`)
+  - `CLAUDE_MODEL` (default `claude-3-7-sonnet-latest`)
+  - `CLAUDE_BASE_URL` (default `https://api.anthropic.com/v1/messages`)
 
 Shared sampling knobs:
 - `MAFIA_PROVIDER_TEMPERATURE` (default `0.2`)
@@ -166,11 +180,74 @@ Shared sampling knobs:
   - install Python package: `pip3 install sambanova`
 - If your API keys are set in system env already, run `npm run env:sync` to copy them into `.env`.
 
+### Raspberry Pi Parallel Tournament (recommended)
+
+Example `.env` for your setup:
+
+```env
+MAFIA_HEADLESS=1
+PYTHON_BIN=python3
+MAFIA_USE_PUTER=1
+PUTER_AUTH_TOKENS=token1,token2,token3
+MISTRAL_API_KEY=your_mistral_key
+GROQ_API_KEY=your_groq_key
+CLAUDE_API_KEY=your_claude_key
+SAMBANOVA_API_KEY=your_sambanova_key
+MAFIA_PROVIDER_CHAIN=puter,mistral,groq,sambanova
+```
+
+Run on Pi:
+
+```bash
+cd <YOUR_REPO>
+npm install
+npm run run:pi:cli
+```
+
+Then in CLI:
+
+```text
+llm on
+playercount 8
+new
+multipar 50 5
+```
+
+Tips for Pi:
+- Start with `multipar 20 3` if you hit rate limits/timeouts.
+- Increase to `k=5` only after stable runs.
+
+Mixed layout you requested (3 puter + 1 mistral + 2/3 groq + 1 claude + 1 sambanova):
+
+```text
+playercount 8
+new
+multimix 40 3
+```
+
+If you want 2 groq workers instead, use:
+```text
+multimix 40 2
+```
+
+## Google Colab Quickstart
+
+Use the prepared guide:
+
+- `colab/COLAB_SETUP.md`
+
+It includes:
+- one-cell dependency setup
+- Colab proxy URL generation for the GUI
+- headless-safe env defaults (`MAFIA_HEADLESS=1`)
+
 ## Commands
 
 - `next`: advance one phase
 - `run`: auto-run until a winner
 - `multi <n>`: run `n` games consecutively (tournament mode)
+- `multipar <n> [k]`: run `n` games with up to `k` concurrent workers (default `5`)
+- `multimix <n> [groq=2|3]`: run `n` games across mixed workers (3 puter + 1 mistral + groq + 1 claude + 1 sambanova)
 - `players`: list player states
 - `transcript [n]`: show last `n` transcript lines (default `20`)
 - `log [n]`: show game-log/debug lines (default `20`)
